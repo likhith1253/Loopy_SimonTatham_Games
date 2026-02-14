@@ -6,6 +6,7 @@ Hierarchical orchestration layer for CPU move selection.
 Rules:
 - Keep solver implementations pure.
 - In DP mode: call ONLY the DP solver (no fallback chain).
+- In Advanced DP mode: Advanced DP -> DP -> D&C -> Greedy fallback.
 - In D&C mode: D&C solver -> Greedy fallback.
 - In Greedy mode: Greedy solver only.
 - Re-evaluate full priority order on every CPU turn.
@@ -37,6 +38,7 @@ class StrategyController:
 
         DP mode: calls ONLY the DP solver. No fallback chain.
                  DP is guaranteed to never return None.
+        Advanced DP mode: calls Advanced DP -> DP -> D&C -> Greedy fallback.
         D&C mode: D&C solver -> Greedy fallback.
         Greedy mode: Greedy solver only.
 
@@ -50,6 +52,30 @@ class StrategyController:
             if move is not None:
                 return move, "DP"
             # This should never happen, but handle gracefully
+            return None, "No moves available"
+
+        if self.selected_mode == "advanced_dp":
+            # Advanced DP mode: Advanced DP -> DP -> D&C -> Greedy fallback
+            
+            # 1. Advanced DP (Aggregated Profile D&C)
+            move = self._try_solver(self.advanced_dp_solver)
+            if move is not None:
+                return move, "Advanced DP"
+
+            # 2. Standard DP (Profile DP)
+            move = self._try_solver(self.dp_solver)
+            if move is not None:
+                return move, "DP (Fallback)"
+
+            # 3. Standard D&C (Spatial Decomposition)
+            move = self._try_solver(self.dnc_solver)
+            if move is not None:
+                return move, "D&C (Fallback)"
+            
+            # 4. Greedy (Heuristic)
+            move = self._try_solver(self.greedy_solver)
+            if move is not None:
+                return move, "Greedy (Fallback)"
             return None, "No moves available"
 
         if self.selected_mode == "dnc":
@@ -70,13 +96,15 @@ class StrategyController:
 
     def get_solver_for_source(self, source: str) -> Optional[Any]:
         """Return the solver instance that produced the move."""
-        if source.startswith("DP"):
-            if source.startswith("DP (Advanced)"):
+        if source == "Advanced DP":
+            return self.advanced_dp_solver
+        if "DP" in source: # DP or DP (Fallback)
+            if "Advanced" in source: 
                 return self.advanced_dp_solver
             return self.dp_solver
-        if source.startswith("D&C"):
+        if "D&C" in source: # D&C or D&C (Fallback)
             return self.dnc_solver
-        if source.startswith("Greedy"):
+        if "Greedy" in source: # Greedy or Greedy (Fallback)
             return self.greedy_solver
         return None
 
@@ -89,6 +117,14 @@ class StrategyController:
         if self.selected_mode == "dp":
             # No fallback in DP mode
             return None
+        
+        if self.selected_mode == "advanced_dp":
+             if source == "DP (Fallback)":
+                 return "Advanced DP uncertain. Falling back to Standard Profile DP."
+             if source == "D&C (Fallback)":
+                 return "Both DP solvers uncertain. Falling back to Spatial Divide & Conquer."
+             if source == "Greedy (Fallback)":
+                return "All logical solvers exhausted. Switched to Greedy heuristics."
 
         if self.selected_mode == "dnc":
             if source == "Greedy (Fallback)":
@@ -120,6 +156,8 @@ class StrategyController:
         """Normalize mode string to internal representation."""
         if mode in ("dynamic_programming", "dp"):
             return "dp"
+        if mode in ("advanced_dp", "adp", "advanced"):
+            return "advanced_dp"
         if mode in ("divide_conquer", "divide_and_conquer", "dnc"):
             return "dnc"
         return "greedy"

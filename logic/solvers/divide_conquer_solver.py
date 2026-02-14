@@ -127,6 +127,29 @@ class DivideConquerSolver(AbstractSolver):
             "merge_stage": self.merge_stage,
         }
 
+        # --- Cognitive Visualization Layer ---
+        # Construct MoveExplanation from D&C context
+        region = (0, 0, self.game_state.rows - 1, self.game_state.cols - 1)
+        # Try to parse region from last trace if available, otherwise default to full board
+        # In a real implementation we'd track the specific active region better,
+        # but for now we'll use the full board or the last logged region.
+
+        from logic.solvers.solver_interface import MoveExplanation
+        self._last_move_metadata = MoveExplanation(
+            mode="Divide & Conquer",
+            scope="Regional",  # or Global if full board
+            decision_summary=self._last_explanation.replace("Using Divide & Conquer Strategy: ", ""),
+            highlight_cells=[],
+            highlight_edges=[move] if move else [],
+            highlight_region=region,
+            reasoning_data={
+                "recursion_depth": self.recursion_depth,
+                "merge_stage": self.merge_stage,
+                "region_id": self.current_region_id
+            }
+        )
+        # -------------------------------------
+
     def explain_last_move(self) -> str:
         return self._last_explanation
 

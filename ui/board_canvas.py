@@ -124,6 +124,9 @@ class BoardCanvas(tk.Canvas):
                     
                 self.create_text(mx, my, text=str(weight), font=FONT_SMALL, fill=TEXT_DIM)
 
+        # Draw Cognitive Overlay (Reasoning Layer)
+        self._draw_overlay_elements()
+
     def _draw_edge(self, edge, color, width):
         (r1, c1), (r2, c2) = edge
         x1 = self.start_x + c1 * self.cell_size
@@ -265,6 +268,77 @@ class BoardCanvas(tk.Canvas):
         self.hint_edge = edge
         self.hint_color = color
         self.draw()
+
+    # ------------------------------------------------------------------
+    # COGNITIVE VISUALIZATION LAYER
+    # ------------------------------------------------------------------
+    def show_reasoning_overlay(self, explanation):
+        """
+        Display the cognitive overlay:
+        - Scope highlight (Region/Global/Local)
+        - Decided edge highlight
+        """
+        self.current_overlay = explanation
+        self.draw()
+
+    def clear_overlay(self):
+        self.current_overlay = None
+        self.draw()
+
+    def _draw_overlay_elements(self):
+        if not hasattr(self, "current_overlay") or not self.current_overlay:
+            return
+
+        expl = self.current_overlay
+        
+        # 1. Region Highlight
+        if expl.scope == "Global":
+            # Faint purple over whole board
+            self._draw_region_rect((0, 0, self.game_state.rows-1, self.game_state.cols-1), "#6f42c1", alpha=0.1)
+        
+        elif expl.scope == "Regional" and expl.highlight_region:
+            # Faint blue over specific region
+            self._draw_region_rect(expl.highlight_region, "#17a2b8", alpha=0.15)
+
+        elif expl.scope == "Local" and expl.highlight_cells:
+            # Highlight specific cells involved
+            for r, c in expl.highlight_cells:
+                self._draw_cell_highlight(r, c, "#28a745", alpha=0.2)
+
+        # 2. Edge Highlight (Strong)
+        if expl.highlight_edges:
+            for edge in expl.highlight_edges:
+                self._draw_edge(edge, APPLE_YELLOW, width=5)
+
+    def _draw_region_rect(self, region, color, alpha):
+        # Tkinter doesn't support alpha directly on canvas shapes easily without PIL or stippling.
+        # We'll use a stipple pattern to simulate transparency or just a colored outline + thin crossover.
+        # For a "Cognitive" feel, let's use a nice outline and a very light stipple if possible,
+        # or just a distinct outline convention.
+        
+        # Simulating "Faint" fill with stipple 'gray25' or similar if available, 
+        # but cross-platform stipples are flaky. 
+        # Let's use a hollow rectangle with thick borders for now, or lines.
+        
+        r_min, c_min, r_max, c_max = region
+        
+        x1 = self.start_x + c_min * self.cell_size
+        y1 = self.start_y + r_min * self.cell_size
+        x2 = self.start_x + (c_max + 1) * self.cell_size
+        y2 = self.start_y + (r_max + 1) * self.cell_size
+        
+        # Draw soft background (stippled)
+        self.create_rectangle(x1, y1, x2, y2, fill=color, outline="", stipple="gray12", tags="overlay")
+        # Draw strong border
+        self.create_rectangle(x1, y1, x2, y2, outline=color, width=2, tags="overlay")
+
+    def _draw_cell_highlight(self, r, c, color, alpha):
+        x1 = self.start_x + c * self.cell_size
+        y1 = self.start_y + r * self.cell_size
+        x2 = x1 + self.cell_size
+        y2 = y1 + self.cell_size
+        
+        self.create_rectangle(x1, y1, x2, y2, fill=color, outline="", stipple="gray25", tags="overlay")
 
     # ------------------------------------------------------------------
     # AI VISUALIZATION FEATURES

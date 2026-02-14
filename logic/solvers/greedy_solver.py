@@ -120,6 +120,7 @@ class GreedySolver(AbstractSolver):
                 "strategy": "Greedy",
             }
             self._last_explanation = self.game_state.last_cpu_move_info["explanation"]
+            self._last_move_metadata = None
             return
 
         explanation = self._pending_explanations.get(
@@ -136,6 +137,23 @@ class GreedySolver(AbstractSolver):
             "strategy": "Greedy",
         }
         self._last_explanation = explanation
+
+        # --- Cognitive Visualization Layer ---
+        # Construct MoveExplanation from local context
+        highlight_cells = self._adjacent_cells(move)
+        short_summary = explanation.replace("Using Greedy Strategy: ", "").split(";")[0]
+
+        from logic.solvers.solver_interface import MoveExplanation
+        self._last_move_metadata = MoveExplanation(
+            mode="Greedy",
+            scope="Local",
+            decision_summary=f"Applied local rule: {short_summary}",
+            highlight_cells=highlight_cells,
+            highlight_edges=[move],
+            highlight_region=None,
+            reasoning_data={"rule": short_summary}
+        )
+        # -------------------------------------
 
         # Keep trace integration for UI analysis.
         try:
