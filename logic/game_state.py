@@ -49,6 +49,7 @@ class GameState:
             self.strategy_controller = None
         self.stats_mgr = StatisticsManager()
         self.last_cpu_move_info = None  # To store explanation of the last CPU move
+        self.live_analysis_table = []   # Live comparative analysis results
         
         # Greedy Mode Mechanics
         self.edge_weights = {}

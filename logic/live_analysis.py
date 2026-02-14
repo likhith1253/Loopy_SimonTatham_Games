@@ -1,100 +1,83 @@
+"""
+Live Analysis Service
+=====================
+Runs all three solvers (Greedy, D&C, DP) on isolated board clones
+and records their move choice, execution time, and states explored.
+
+Correctness guarantees:
+- Each solver gets a deep-copied board state (no shared mutable objects).
+- Solver APIs match the real game flow exactly:
+  Greedy -> decide_move(), D&C -> solve(), DP -> solve().
+- Results are appended to game_state.live_analysis_table.
+- Move numbering is derived from the table length (no internal counter).
+"""
 
 import time
-import threading
 import concurrent.futures
 import copy
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
+
 from logic.game_state import GameState
 from logic.solvers.greedy_solver import GreedySolver
 from logic.solvers.divide_conquer_solver import DivideConquerSolver
 from logic.solvers.dynamic_programming_solver import DynamicProgrammingSolver
 
+
 class LiveAnalysisService:
     """
-    Service to run live comparative analysis of solvers in the background.
+    Service to run live comparative analysis of all solvers.
+    Re-instantiated every CPU turn — stateless by design.
     """
-    
+
+    # Timeout per solver (seconds). DP and D&C can be slow on large boards.
+    SOLVER_TIMEOUT = 2.0
+
     def __init__(self, game_state: GameState):
         self.game_state = game_state
-        self.move_counter = 0
 
     def run_analysis(self) -> Optional[Dict[str, Any]]:
         """
-        Runs the analysis for the current board state.
-        Returns a dictionary with the analysis results.
-        Safe to call from UI thread (spawns internal threads/futures).
+        Snapshot current board, run all 3 solvers in parallel, collect results.
+        Appends result row to game_state.live_analysis_table.
         """
-        # 1. Build independent simulation states (one per thread/solver)
-        greedy_state = self._create_isolated_simulation_state()
-        dnc_state = self._create_isolated_simulation_state()
-        dp_state = self._create_isolated_simulation_state()
+        # Move number = current row count + 1 (not a resettable counter)
+        move_number = len(self.game_state.live_analysis_table) + 1
 
-        # Debug safety assertions: no shared simulation graph objects.
-        assert id(greedy_state.graph) != id(dnc_state.graph)
-        assert id(greedy_state.graph) != id(dp_state.graph)
-        assert id(dnc_state.graph) != id(dp_state.graph)
+        # Build 3 independent simulation board states
+        greedy_state = self._create_isolated_state()
+        dnc_state = self._create_isolated_state()
+        dp_state = self._create_isolated_state()
 
-        # Additional mutable-container isolation checks.
-        assert id(greedy_state.graph.edges) != id(dnc_state.graph.edges)
-        assert id(greedy_state.graph.edges) != id(dp_state.graph.edges)
-        assert id(dnc_state.graph.edges) != id(dp_state.graph.edges)
-        assert id(greedy_state.graph.vertices) != id(dnc_state.graph.vertices)
-        assert id(greedy_state.graph.vertices) != id(dp_state.graph.vertices)
-        assert id(dnc_state.graph.vertices) != id(dp_state.graph.vertices)
-        assert id(greedy_state.clues) != id(dnc_state.clues)
-        assert id(greedy_state.clues) != id(dp_state.clues)
-        assert id(dnc_state.clues) != id(dp_state.clues)
-        assert id(greedy_state.solution_edges) != id(dnc_state.solution_edges)
-        assert id(greedy_state.solution_edges) != id(dp_state.solution_edges)
-        assert id(dnc_state.solution_edges) != id(dp_state.solution_edges)
-        self.move_counter += 1
-        current_move_num = self.move_counter
-        
-        # 2. Define Simulation Tasks Wrapper methods
-        def run_greedy_task():
-             return self._run_greedy(greedy_state)
-             
-        def run_dp_task():
-             return self._run_dp(dp_state)
-             
-        def run_dnc_task():
-             return self._run_dnc(dnc_state)
-
-        # 3. Execute in Parallel with Timeout
+        # Default result row
         results = {
-            "move_number": current_move_num,
+            "move_number": move_number,
             "greedy_move": "N/A", "greedy_time": 0.0, "greedy_states": 0,
             "dnc_move": "N/A", "dnc_time": 0.0, "dnc_states": 0,
             "dp_move": "N/A", "dp_time": 0.0, "dp_states": 0,
         }
-        
-        # Using ThreadPoolExecutor because solvers are CPU-intensive but we want to fail gracefully on timeout.
-        # Python threads don't truly parallelize CPU work due to GIL, but they allow us to coordinate timeouts.
+
+        # Run solvers in parallel with timeout
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            future_greedy = executor.submit(run_greedy_task)
-            future_dnc = executor.submit(run_dnc_task)
-            future_dp = executor.submit(run_dp_task)
-            
+            future_greedy = executor.submit(self._run_greedy, greedy_state)
+            future_dnc = executor.submit(self._run_dnc, dnc_state)
+            future_dp = executor.submit(self._run_dp, dp_state)
+
             futures_map = {
                 "greedy": future_greedy,
                 "dnc": future_dnc,
                 "dp": future_dp,
             }
-            
+
             for key, future in futures_map.items():
                 try:
-                    # STRICT TIMEOUT: 0.25 seconds total wait per solver
-                    # Note: They start roughly at same time, so this is ~0.25s wall clock for all.
-                    res = future.result(timeout=0.25)
-                    
+                    res = future.result(timeout=self.SOLVER_TIMEOUT)
                     if res:
                         results[f"{key}_move"] = str(res.get("move", "None"))
                         results[f"{key}_time"] = round(res.get("time", 0) * 1000, 2)
                         results[f"{key}_states"] = res.get("states", 0)
-                        
                 except concurrent.futures.TimeoutError:
                     results[f"{key}_move"] = "Timeout"
-                    results[f"{key}_time"] = 250.0  # Maxed out visually
+                    results[f"{key}_time"] = round(self.SOLVER_TIMEOUT * 1000, 1)
                     results[f"{key}_states"] = "N/A"
                 except Exception as e:
                     results[f"{key}_move"] = "Error"
@@ -102,81 +85,92 @@ class LiveAnalysisService:
                     results[f"{key}_states"] = "Err"
                     print(f"[LiveAnalysis] Error in {key}: {e}")
 
-        # Append to history in the MAIN game state (not the clone)
+        # Append to REAL game state (not clone)
         self.game_state.live_analysis_table.append(results)
         return results
 
-    def _create_isolated_simulation_state(self) -> GameState:
+    # ── Isolation ──────────────────────────────────────────────
+
+    def _create_isolated_state(self) -> GameState:
         """
-        Build a thread-local simulation state with no shared mutable references.
+        Build a fully independent board snapshot.
+        Uses clone_for_simulation() as base, then deep-copies all containers
+        to guarantee zero shared mutable references between threads.
         """
         state = self.game_state.clone_for_simulation()
 
-        # Ensure graph is deeply isolated and adjacency is consistent with edges.
+        # Deep-copy all mutable containers to ensure thread safety
         state.graph = self.game_state.graph.copy()
-
-        # Ensure no shared mutable containers from source state.
         state.clues = copy.deepcopy(self.game_state.clues)
         state.edge_weights = copy.deepcopy(self.game_state.edge_weights)
-        state.solution_edges = copy.deepcopy(getattr(self.game_state, "solution_edges", set()))
+        state.solution_edges = copy.deepcopy(
+            getattr(self.game_state, "solution_edges", set())
+        )
 
-        # If DSU/cache-like structures exist, isolate them as well.
         if hasattr(self.game_state, "dsu"):
             state.dsu = copy.deepcopy(self.game_state.dsu)
 
         return state
 
-    def _run_greedy(self, state_clone: GameState):
+    # ── Solver Runners ─────────────────────────────────────────
+
+    def _run_greedy(self, state_clone: GameState) -> Dict[str, Any]:
+        """
+        Greedy solver: uses decide_move() — same API as real game.
+        'states' = number of actionable candidate edges found by rule propagation.
+        """
         start = time.time()
-        # Instantiate fresh solver on the clone
         solver = GreedySolver(state_clone)
-        
-        # Run logic
-        # decide_move returns (candidates, best_move)
+
         candidates, best_move = solver.decide_move()
-        
         duration = time.time() - start
+
+        # Greedy doesn't track "states" in the DP sense.
+        # candidates = list of deduced edge moves with priorities.
         states_explored = len(candidates) if candidates else 0
-        
+
         return {
             "move": best_move,
             "time": duration,
-            "states": states_explored
+            "states": states_explored,
         }
 
-    def _run_dp(self, state_clone: GameState):
+    def _run_dp(self, state_clone: GameState) -> Dict[str, Any]:
+        """
+        DP solver: uses solve() — same API as real game.
+        'states' = dp_state_count (number of DP profile states generated).
+        """
         start = time.time()
         solver = DynamicProgrammingSolver(state_clone)
-        
-        # Force computation
-        # solve() -> triggers _compute_full_solution internally
+
         move = solver.solve()
-        
         duration = time.time() - start
-        
-        # Access internal metrics
+
+        # dp_state_count is incremented inside _compute_full_solution
         states_explored = getattr(solver, "dp_state_count", 0)
-        
+
         return {
             "move": move,
             "time": duration,
-            "states": states_explored
+            "states": states_explored,
         }
 
-    def _run_dnc(self, state_clone: GameState):
+    def _run_dnc(self, state_clone: GameState) -> Dict[str, Any]:
+        """
+        D&C solver: uses solve() — same API as real game.
+        'states' = recursion depth reached during divide and conquer.
+        """
         start = time.time()
         solver = DivideConquerSolver(state_clone)
-        
-        # Force computation
+
         move = solver.solve()
-        
         duration = time.time() - start
-        
-        # D&C solver does not currently expose exact state counts.
-        total_states = 0
+
+        # D&C tracks recursion_depth as its primary metric
+        recursion_depth = getattr(solver, "recursion_depth", 0)
 
         return {
             "move": move,
             "time": duration,
-            "states": total_states
+            "states": recursion_depth,
         }

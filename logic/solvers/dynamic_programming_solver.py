@@ -236,89 +236,113 @@ class DynamicProgrammingSolver(AbstractSolver):
     def _certainty_based_move(self) -> Tuple[Edge, str, str]:
         """
         Core certainty-based move selection.
-
-        STEP 1: Compute full valid solution space
-        STEP 2: Frequency analysis
-        STEP 3: Move selection priority
-        STEP 4: Deterministic ordering (merge sort)
-        STEP 5: Apply move
+        ALL return paths set _last_move_metadata for the Reasoning Panel.
 
         Returns:
             (edge, action, explanation) — NEVER returns None.
         """
+        from logic.solvers.solver_interface import MoveExplanation
+        current_edges = set(self.game_state.graph.edges)
+        all_potential = self._get_all_potential_edges()
+        total_potential = len(all_potential)
+        placed_count = len(current_edges)
+        progress_pct = round(placed_count / max(total_potential, 1) * 100)
+
+        def _set_meta(edge, summary, num_solutions=0, freq=0, certainty=0.0):
+            """Helper: set _last_move_metadata for any return path."""
+            self._last_move_metadata = MoveExplanation(
+                mode="Dynamic Programming",
+                scope="Global",
+                decision_summary=summary,
+                highlight_cells=[],
+                highlight_edges=[edge],
+                highlight_region=(0, 0, self.rows - 1, self.cols - 1),
+                reasoning_data={
+                    "total_solutions": num_solutions,
+                    "edge_frequency": freq,
+                    "certainty": certainty,
+                    "dp_states": self.dp_state_count,
+                    "progress": f"{placed_count}/{total_potential}",
+                }
+            )
+
         # STEP 1 — Compute full valid solution space
         try:
             all_solutions = self._compute_all_valid_solutions()
         except RuntimeError:
-            # No valid complete solutions found by DP.
-            # Use deterministic valid-edge scan (pure constraint analysis, no fallback).
+            # No complete solutions found — use constraint analysis
             from logic.validators import is_valid_move
-            current_edges = set(self.game_state.graph.edges)
-            all_potential = self._get_all_potential_edges()
             for edge in merge_sort(all_potential):
                 if edge not in current_edges:
                     valid, _ = is_valid_move(
                         self.game_state.graph, edge[0], edge[1], self.game_state.clues
                     )
                     if valid:
-                        return (
-                            edge,
-                            "include",
-                            f"DP certainty-based selection: No complete solution space "
-                            f"available yet. Adding constraint-valid edge {edge}.",
+                        summary = (
+                            f"Global DP scanned all {total_potential} edges across the "
+                            f"{self.rows}x{self.cols} grid. No complete loop solution "
+                            f"exists yet ({placed_count} edges placed, {progress_pct}% progress). "
+                            f"Using constraint analysis to add edge {edge} — "
+                            f"validated against all {len(self.game_state.clues)} clue constraints."
                         )
-            # If no addable edge is valid, try first potential edge
-            edge = merge_sort(all_potential)[0]
-            return (
-                edge,
-                "include",
-                "DP certainty-based selection: Constraint-valid edge selection.",
-            )
+                        _set_meta(edge, summary)
+                        return (edge, "include", f"DP certainty-based selection: {summary}")
 
-        # Determine undecided edges
-        current_edges = set(self.game_state.graph.edges)
-        all_potential = self._get_all_potential_edges()
+            edge = merge_sort(all_potential)[0]
+            summary = (
+                f"Global DP exhausted all constraint checks across {total_potential} edges. "
+                f"Board is {progress_pct}% filled. "
+                f"Selecting edge {edge} for exploratory placement."
+            )
+            _set_meta(edge, summary)
+            return (edge, "include", f"DP certainty-based selection: {summary}")
+
+        # Solution space computed
+        num_solutions = len(all_solutions)
         undecided = [e for e in all_potential if e not in current_edges]
 
-        # Also consider edges currently on the board that might need removal
-        # Check which current edges might not belong to any solution
+        # Forced exclusion: edge on board that appears in NO solution
         if all_solutions:
             solution_union = set()
             for sol in all_solutions:
                 solution_union.update(sol)
 
-            # Edges on board that are in NO solution → forced removal candidates
             removable = [e for e in merge_sort(list(current_edges))
                          if e not in solution_union]
             if removable:
                 edge = removable[0]
-                return (
-                    edge,
-                    "exclude",
-                    f"DP certainty-based selection: Remove edge {edge} — "
-                    f"present in 0/{len(all_solutions)} solutions (forced exclusion).",
+                summary = (
+                    f"Global DP analyzed {num_solutions} valid solution(s) across the "
+                    f"entire {self.rows}x{self.cols} grid. Edge {edge} appears in "
+                    f"0/{num_solutions} solutions — it contradicts every valid loop. "
+                    f"Removing it to converge toward the correct solution."
                 )
+                _set_meta(edge, summary, num_solutions, 0, 1.0)
+                return (edge, "exclude", f"DP certainty-based selection: {summary}")
 
         if not undecided:
-            # All potential edges are placed; check for removals from current edges
             if all_solutions:
-                best_solution = merge_sort(list(all_solutions), key=lambda s: tuple(merge_sort(list(s))))[0]
+                best_solution = merge_sort(
+                    list(all_solutions),
+                    key=lambda s: tuple(merge_sort(list(s)))
+                )[0]
                 for edge in merge_sort(list(current_edges)):
                     if edge not in best_solution:
-                        return (
-                            edge,
-                            "exclude",
-                            f"DP certainty-based selection: Remove edge {edge} — "
-                            f"not part of the optimal DP solution.",
+                        summary = (
+                            f"Board is {progress_pct}% complete. DP found {num_solutions} "
+                            f"valid solution(s) and is refining toward the optimal one. "
+                            f"Edge {edge} is not part of the best valid loop — removing it."
                         )
+                        _set_meta(edge, summary, num_solutions, 0, 1.0)
+                        return (edge, "exclude", f"DP certainty-based selection: {summary}")
 
-            # Truly nothing left — return first potential edge as identity move
             edge = merge_sort(all_potential)[0]
-            return (
-                edge,
-                "include",
-                "DP certainty-based selection: Board fully resolved.",
+            summary = (
+                f"Board fully resolved ({progress_pct}% filled, "
+                f"{num_solutions} solutions analyzed). All edges decided."
             )
+            _set_meta(edge, summary, num_solutions, 0, 1.0)
+            return (edge, "include", f"DP certainty-based selection: {summary}")
 
         # STEP 2 — Frequency analysis
         count_on, total = self._frequency_analysis(all_solutions, undecided)
@@ -326,6 +350,23 @@ class DynamicProgrammingSolver(AbstractSolver):
         # STEP 3 & 4 — Move selection with deterministic ordering
         move, action, explanation = self._select_best_move(count_on, total, undecided)
 
+        # Certainty calculation
+        raw_certainty = 0.0
+        if move in count_on:
+            raw_certainty = abs((count_on[move] / total) - 0.5)
+        normalized_certainty = raw_certainty * 2.0
+        freq = count_on.get(move, 0)
+
+        summary = (
+            f"Global DP analyzed {total} valid solution(s) across the "
+            f"{self.rows}x{self.cols} grid ({len(undecided)} edges undecided, "
+            f"{progress_pct}% progress). Edge {move} appears in {freq}/{total} "
+            f"solutions ({round(normalized_certainty * 100)}% certainty). "
+            f"{'Adding' if action == 'include' else 'Removing'} this edge "
+            f"maximizes convergence toward the correct loop."
+        )
+
+        _set_meta(move, summary, total, freq, normalized_certainty)
         return move, action, explanation
 
     def _compute_all_valid_solutions(self) -> List[Set[Edge]]:

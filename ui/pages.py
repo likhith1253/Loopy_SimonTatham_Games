@@ -17,6 +17,7 @@ from ui.audio import play_sound
 from ui.strategy_store import strategy_store
 from logic.live_analysis import LiveAnalysisService
 from ui.analysis_panel import LiveAnalysisPanel
+from ui.cpu_reasoning_panel import CPUReasoningPanel
 
 class HomePage(tk.Frame):
     def __init__(self, master, on_start_game, on_show_help):
@@ -282,8 +283,14 @@ class GamePage(tk.Frame):
         HoverButton(controls, text="Undo", command=self.undo, fg=WARNING_COLOR).pack(side=tk.LEFT, padx=5)
         HoverButton(controls, text="Redo", command=self.redo, fg=WARNING_COLOR).pack(side=tk.LEFT, padx=5)
         HoverButton(controls, text="Hint", command=self.hint, fg=SUCCESS_COLOR).pack(side=tk.LEFT, padx=5)
-        HoverButton(controls, text="Explain CPU", command=self.explain_cpu_move, width=12, fg=APPLE_BLUE).pack(side=tk.LEFT, padx=5)
         
+        # --- Cognitive Visualization Layer ---
+        self.var_show_thinking = tk.BooleanVar(value=False)
+        chk_thinking = tk.Checkbutton(controls, text="Show Thinking", variable=self.var_show_thinking,
+                                      bg=BG_COLOR, fg=TEXT_COLOR, selectcolor=BG_COLOR, activebackground=BG_COLOR)
+        chk_thinking.pack(side=tk.RIGHT, padx=5)
+        # -------------------------------------
+
         self.var_live_analysis = tk.BooleanVar(value=False)
         chk_analysis = tk.Checkbutton(controls, text="Enable Live Analysis", variable=self.var_live_analysis,
                                       bg=BG_COLOR, fg=TEXT_COLOR, selectcolor=BG_COLOR, activebackground=BG_COLOR,
@@ -292,12 +299,20 @@ class GamePage(tk.Frame):
         
         HoverButton(controls, text="End Game", command=self.end_game, fg=ERROR_COLOR).pack(side=tk.RIGHT, padx=5)
 
-        # Board Area
-        self.board_frame = CardFrame(self, padx=20, pady=20)
-        self.board_frame.pack(expand=True, fill=tk.BOTH, padx=40, pady=(0, 20))
+        # Game Area: Board (left) + Reasoning Panel (right)
+        game_area = tk.Frame(self, bg=BG_COLOR)
+        game_area.pack(expand=True, fill=tk.BOTH, padx=40, pady=(0, 20))
+
+        # Board (left, expanding)
+        self.board_frame = CardFrame(game_area, padx=20, pady=20)
+        self.board_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
         
         self.canvas = BoardCanvas(self.board_frame, game_state, self.on_move)
         self.canvas.pack(expand=True, fill=tk.BOTH)
+
+        # CPU Reasoning Panel (right, fixed width)
+        self.reasoning_panel = CPUReasoningPanel(game_area)
+        self.reasoning_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
         
         # Hint explanation panel
         self.hint_explain_card = CardFrame(self, padx=20, pady=15)
@@ -307,34 +322,22 @@ class GamePage(tk.Frame):
         self.lbl_hint_explain = tk.Label(self.hint_explain_card, text="", font=FONT_SMALL, bg=CARD_BG, fg=TEXT_DIM, justify=tk.LEFT, wraplength=760, anchor="w")
         self.lbl_hint_explain.pack(fill=tk.X, pady=(8, 0))
         
-        # Live Analysis Panel (Initially Hidden)
-        self.analysis_panel = LiveAnalysisPanel(self, self.game_state)
-        # Do not pack initially
+        # Live Analysis Window (created lazily on first toggle)
+        self.analysis_panel = None
         
         self.update_ui()
 
     def toggle_analysis_panel(self):
         if self.var_live_analysis.get():
-            self.analysis_panel.pack(fill=tk.BOTH, expand=True, padx=40, pady=(0, 20))
+            if self.analysis_panel is None:
+                self.analysis_panel = LiveAnalysisPanel(self, self.game_state)
+            else:
+                self.analysis_panel.show()
             self.analysis_panel.update_data()
         else:
-            self.analysis_panel.pack_forget()
+            if self.analysis_panel is not None:
+                self.analysis_panel.withdraw()
 
-    def explain_cpu_move(self):
-        """
-        Show a popup explaining the last move made by the CPU.
-        """
-        move_info = getattr(self.game_state, "last_cpu_move_info", None)
-        if not move_info:
-             messagebox.showinfo("CPU Explanation", "No CPU move has been made yet.")
-             return
-             
-        move = move_info.get("move")
-        explanation = move_info.get("explanation", "No explanation available.")
-        strategy = move_info.get("strategy", "Unknown")
-        
-        msg = f"Last Move: {move}\nStrategy: {strategy}\n\nReasoning:\n{explanation}"
-        messagebox.showinfo("CPU Explanation", msg)
 
     def on_move(self, u, v):
         success = self.game_state.make_move(u, v)
@@ -359,10 +362,10 @@ class GamePage(tk.Frame):
 
     def cpu_move(self):
         # 0. Live Analysis Hook
-        if self.var_live_analysis.get():
+        if self.var_live_analysis.get() and self.analysis_panel is not None:
              self.game_state.message = "Running Comparative Analysis..."
              self.update_ui()
-             self.update_idletasks() # Force UI update before freezing for threads
+             self.update_idletasks()
              
              service = LiveAnalysisService(self.game_state)
              service.run_analysis()
@@ -374,43 +377,62 @@ class GamePage(tk.Frame):
         best_move, strategy_source, solver_used, fallback_message = self.game_state.get_next_cpu_move()
 
         if best_move:
-            # 2. Execute directly (Hidden thinking)
-            success = self.finalize_cpu_move(
-                best_move,
-                strategy_override=strategy_source,
-                solver_used=solver_used,
-                fallback_message=fallback_message,
-            )
-            if not success:
-                # Move failed, try again with next move
-                self.after(500, self.cpu_move)
-
+            # Execute move (panel update happens inside finalize_cpu_move)
+            self._execute_cpu_move(best_move, strategy_source, solver_used, fallback_message)
         else:
-            # No moves available, switch turn back to human
-            if not self.game_state.game_over:
-                if strategy_source == "No moves available":
-                    self.game_state.message = "No CPU move available for this board state."
-                elif strategy_source == "DP (No deterministic move)":
-                    self.game_state.message = "DP has no deterministic move on this board state."
-                self.game_state.switch_turn()
-                self.update_ui()
+            self._handle_no_cpu_move(strategy_source)
             self.check_game_over()
+
+    def _execute_cpu_move(self, move, strategy_source, solver_used, fallback_message):
+        success = self.finalize_cpu_move(
+            move,
+            strategy_override=strategy_source,
+            solver_used=solver_used,
+            fallback_message=fallback_message,
+        )
+        if not success:
+            self.after(500, self.cpu_move)
+
+    def _handle_no_cpu_move(self, strategy_source):
+        if not self.game_state.game_over:
+            if strategy_source == "No moves available":
+                self.game_state.message = "No CPU move available for this board state."
+            elif strategy_source == "DP (No deterministic move)":
+                self.game_state.message = "DP has no deterministic move on this board state."
+            self.game_state.switch_turn()
+            self.update_ui()
 
     def finalize_cpu_move(self, move, register_solver_move=True, strategy_override=None, solver_used=None, fallback_message=None):
         u, v = move
         success = self.game_state.make_move(u, v, is_cpu=True)
         
         if not success:
-            # Move failed, return False so CPU can try another move
             return False
 
         active_solver = solver_used if solver_used is not None else self.game_state.cpu
 
-        # Ensure move is registered for solver-side state tracking.
+        # Register move first — this is where _last_move_metadata gets set
         if register_solver_move and hasattr(active_solver, "register_move"):
             active_solver.register_move(move)
 
-        # Store CPU move information for explanation.
+        # --- Cognitive Visualization Layer ---
+        # NOW retrieve explanation (after register_move populated _last_move_metadata)
+        explanation_meta = None
+        if active_solver and hasattr(active_solver, "get_last_move_explanation"):
+            explanation_meta = active_solver.get_last_move_explanation()
+
+        # Update Reasoning Panel (direct reference — no parent chain)
+        if hasattr(self, "reasoning_panel") and self.reasoning_panel is not None:
+            self.reasoning_panel.update_explanation(explanation_meta)
+
+        # Board Overlay (if "Show Thinking" enabled)
+        if self.var_show_thinking.get() and explanation_meta:
+            self.canvas.show_reasoning_overlay(explanation_meta)
+        else:
+            self.canvas.clear_overlay()
+        # -------------------------------------
+
+        # Store CPU move information for explanation popup
         explanation = "No explanation available."
         if hasattr(active_solver, "explain_last_move"):
             explanation = active_solver.explain_last_move()
